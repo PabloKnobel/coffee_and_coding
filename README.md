@@ -1,2 +1,2 @@
-# coffe_and_coding
+# Coffee and Coding
 Example for C&amp;C
