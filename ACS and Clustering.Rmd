@@ -1,0 +1,309 @@
+---
+title: "ACS and Clustering"
+author: "Pablo Knobel"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output:
+  html_document:
+    toc: true
+    number_sections: true
+    toc_float:
+      collapsed: false
+      smooth_scroll: false
+    theme: united
+---
+
+# Loads
+
+```{r}
+
+library(tidycensus)   # For retrieving ACS data (functions: get_acs, census_api_key)
+library(dplyr)        # For data manipulation (functions: mutate, filter, select, bind_rows)
+library(tigris)       # For downloading county geometries (function: counties)
+library(sf)           # For spatial data manipulation (functions: st_intersection, st_union, st_set_geometry)
+library(ggplot2)      # For plotting maps and charts (functions: ggplot, geom_sf, labs, theme_minimal)
+library(ggspatial)    # For adding map tiles (function: annotation_map_tile)
+library(tidyr)        # For data tidying (function: drop_na)
+library(factoextra)   # For cluster visualization (function: fviz_nbclust)
+library(tableone)     # For summary statistics by group (function: CreateTableOne)
+library(fmsb)         # For radar charts (function: radarchart)
+library(reshape2)     # For data reshaping (function: melt)
+```
+
+
+# SES from census
+
+```{r}
+
+# Set your Census API key (install if not already installed)
+census_api_key("c0a3624f34fb76482a64d7077d775860c5a87d98", install = TRUE, overwrite = TRUE)
+
+# Define ACS variables with corresponding labels
+variables <- c(
+  pov200 = "B17020_002",       # Below 200% poverty level
+  hispanic = "B03002_012",      # Hispanic population
+  nhblack = "B03002_004",       # Non-Hispanic Black population
+  unemp = "B23025_005",         # Unemployment
+  lths = "B15002_002",          # Less than high school education
+  renthouse = "B25003_003",     # Renter-occupied housing units
+  total_population = "B01003_001" # Total population
+)
+
+# Define the range of years for ACS data
+years <- 2013:2022
+
+# Retrieve ACS data for each year, include geometry, and add a year column to each dataset
+all_data <- bind_rows(lapply(years, function(yr) {
+  get_acs(
+    geography = "tract",
+    variables = variables,
+    year = yr,
+    survey = "acs5",
+    state = "NY",
+    geometry = TRUE,  # Retrieve spatial geometry for mapping
+    output = "wide"
+  ) %>%
+    mutate(year = yr)  # Add a column indicating the year of the data
+}))
+
+# Calculate percentage values for each variable relative to the total population
+final_data_with_percentages <- all_data %>%
+  mutate(
+    pov200_pct = (pov200E / total_populationE) * 100,
+    hispanic_pct = (hispanicE / total_populationE) * 100,
+    nhblack_pct = (nhblackE / total_populationE) * 100,
+    unemp_pct = (unempE / total_populationE) * 100,
+    lths_pct = (lthsE / total_populationE) * 100,
+    renthouse_pct = (renthouseE / total_populationE) * 100
+  )
+
+# Select only the relevant columns for further analysis
+ses <- final_data_with_percentages %>%
+  select(GEOID, year, geometry, pov200_pct, hispanic_pct, nhblack_pct, 
+         unemp_pct, lths_pct, renthouse_pct)
+
+# Clean up the workspace by removing temporary objects
+rm(all_data, variables, years, final_data_with_percentages)
+gc()
+
+```
+# Limit to NYC
+
+```{r}
+
+# Download county geometries for New York State using tigris
+ny_counties <- counties(state = "NY", cb = TRUE)
+
+# Filter to include only the NYC counties: Bronx, Kings, New York, Queens, Richmond
+nyc_counties <- ny_counties %>% 
+  filter(NAME %in% c("Bronx", "Kings", "New York", "Queens", "Richmond"))
+
+# Combine the county geometries into a single NYC boundary using sf
+nyc_boundary <- st_union(nyc_counties)
+
+# Perform a spatial intersection to keep only the tracts that intersect with NYC
+ses_nyc <- st_intersection(ses, nyc_boundary)
+
+# Clean up intermediate objects from the workspace
+rm(nyc_boundary, nyc_counties, ny_counties, ses)
+gc()
+
+```
+
+# Ploting
+
+```{r}
+# Define the variable to map (e.g., poverty percentage)
+exp <- "pov200_pct"
+
+# Filter data for a specific year (e.g., 2015)
+ses_nyc_temp <- ses_nyc %>%
+  subset(year == 2015)
+
+# Create a map using ggplot2 with filled polygons based on the selected variable
+map_all <- ggplot() +
+  # Add background map tiles using Carto's light basemap
+  annotation_map_tile(type = "cartolight", zoom = 12) +
+  # Plot the spatial data with filled polygons (no borders)
+  geom_sf(data = ses_nyc_temp, aes(fill = .data[[exp]]), color = NA) +
+  # Apply a Viridis color scale for the fill
+  scale_fill_viridis_c(option = "viridis", name = exp) +
+  labs(title = paste("Map of", exp, "in NYC")) +
+  theme_minimal()
+
+# Display the map
+print(map_all)
+
+```
+
+# Clustering
+
+## Data preparation
+
+```{r}
+
+# Remove rows with any NA values and round numeric columns to 3 decimals
+filtered_data <- ses_nyc_temp %>%
+  drop_na() %>%
+  mutate(across(where(is.numeric), round, 3))
+
+# Save GEOID and year for later reference (if needed)
+GEOID_year <- filtered_data %>%
+  select(GEOID, year)
+
+# Remove GEOID and year columns for clustering analysis
+filtered_data <- filtered_data %>%
+  select(-GEOID, -year)
+
+# Drop the spatial geometry, converting the sf object to a regular data frame
+filtered_data <- st_set_geometry(filtered_data, NULL)
+
+# Standardize the data by scaling each numeric variable to the [0, 1] range
+scaled_data <- as.data.frame(lapply(filtered_data, function(x) (x - min(x)) / (max(x) - min(x))))
+
+```
+
+## Elbow plot
+
+```{r}
+
+# Determine the optimal number of clusters using the Elbow Method
+fviz_nbclust(scaled_data, kmeans, method = "wss")
+
+```
+
+```{r}
+
+# Set the desired number of clusters (adjust 'k' as needed)
+k <- 3
+
+# Perform k-means clustering with 25 random starts for stability
+kmeans_result <- kmeans(scaled_data, centers = k, nstart = 25)
+
+```
+
+## Evaluation
+
+### Summary Stats
+```{r}
+
+# Create a new variable for cluster assignment
+Cluster <- kmeans_result$cluster
+
+# Combine the cluster labels with the filtered data
+data_with_cluster <- cbind(filtered_data, Cluster)
+
+# Generate summary statistics for all variables by cluster
+CreateTableOne(data = data_with_cluster)
+
+# Generate stratified summary statistics by cluster
+CreateTableOne(data = data_with_cluster, strata = "Cluster")
+
+```
+
+
+### spider plots
+
+```{r}
+# Aggregate data: compute the mean of each variable by cluster
+radar_data <- aggregate(filtered_data, by = list(Cluster = kmeans_result$cluster), FUN = mean)
+
+# Add maximum and minimum rows for proper radar chart scaling
+radar_data <- rbind(
+  apply(radar_data[, -1], 2, max),
+  apply(radar_data[, -1], 2, min),
+  radar_data[, -1]
+)
+
+# Plot a radar chart for each cluster
+for (i in 3:nrow(radar_data)) {
+  radarchart(
+    radar_data[c(1, 2, i), ],
+    axistype = 1,
+    pcol = "blue", 
+    pfcol = adjustcolor("blue", alpha.f = 0.2), 
+    plwd = 2,
+    title = paste("Cluster", i - 2)
+  )
+}
+
+```
+
+### Heatmap
+
+```{r}
+
+# Aggregate the scaled data by cluster (compute mean for each cluster)
+cluster_summary <- aggregate(scaled_data, by = list(Cluster = kmeans_result$cluster), FUN = mean)
+
+# Reshape the data to long format using reshape2
+cluster_melt <- melt(cluster_summary, id.vars = "Cluster")
+
+# Create a heatmap of cluster averages using ggplot2
+heat_map <- ggplot(cluster_melt, aes(x = variable, y = as.factor(Cluster), fill = value)) +
+  geom_tile() +
+  scale_fill_gradient2(low = "blue", high = "red", mid = "white", midpoint = 0) +
+  labs(title = "Heatmap of Cluster Averages", x = "Variable", y = "Cluster") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+# Display the heatmap
+print(heat_map)
+
+
+#tiff("C:/Users/knobep01/OneDrive - The Mount Sinai Hospital/Maayans lab/Pablo/Build_Social_PhenoAge/MSDW/ProcesedFiles/Clustering Urban nature/heatmap.tiff", units="in", width=12, height=8, res=300)
+#heat_map
+#dev.off()
+
+```
+
+### Boxplots
+
+```{r}
+
+# Reshape the data for boxplot visualization using reshape2
+cluster_melt <- melt(data_with_cluster, id.vars = "Cluster")
+cluster_melt$Cluster <- as.factor(cluster_melt$Cluster)
+
+# Create boxplots of each variable across clusters (faceted by variable)
+box_plot <- ggplot(cluster_melt, aes(x = Cluster, y = value, fill = Cluster)) +
+  geom_boxplot() +
+  facet_wrap(~ variable, scales = "free") +
+  labs(title = "Boxplots of Variables by Cluster") +
+  theme_minimal()
+
+# Display the boxplot
+print(box_plot)
+
+# Alternatively, boxplots faceted by Cluster with fill by variable
+ggplot(cluster_melt, aes(x = Cluster, y = value, fill = variable)) +
+  geom_boxplot() +
+  facet_wrap(~ Cluster, scales = "free") +
+  labs(title = "Boxplots of Variables by Cluster") +
+  theme_minimal()
+
+```
+
+## Map
+
+```{r}
+
+# Bind the saved GEOID and year back to the clustering results.
+GEOID_2015 <- GEOID_year %>%
+  subset(year == 2015)
+data_with_cluster <- cbind(GEOID_2015, data_with_cluster)
+
+# Create a map of clusters using ggplot2
+cluster_map <- ggplot() +
+  # Add background map tiles
+  annotation_map_tile(type = "cartolight", zoom = 12) +
+  # Plot the tracts filled by cluster assignment (converted to a factor for discrete colors)
+  geom_sf(data = data_with_cluster, aes(fill = factor(Cluster)), color = NA) +
+  scale_fill_viridis_d(name = "Cluster") +
+  labs(title = "Cluster Map of NYC Tracts (2015)") +
+  theme_minimal()
+
+# Display the cluster map
+print(cluster_map)
+
+```
+
