@@ -32,8 +32,11 @@ library(reshape2)     # For data reshaping (function: melt)
 
 # SES from census
 
-```{r}
+Basic tutorial at: https://walker-data.com/tidycensus/articles/basic-usage.html
+Key obtained from: http://api.census.gov/data/key_signup.html
+Where to find variables: https://data.census.gov/table
 
+```{r}
 # Set your Census API key (install if not already installed)
 census_api_key("c0a3624f34fb76482a64d7077d775860c5a87d98", install = TRUE, overwrite = TRUE)
 
@@ -64,7 +67,10 @@ all_data <- bind_rows(lapply(years, function(yr) {
   ) %>%
     mutate(year = yr)  # Add a column indicating the year of the data
 }))
+```
 
+
+```{r}
 # Calculate percentage values for each variable relative to the total population
 final_data_with_percentages <- all_data %>%
   mutate(
@@ -86,6 +92,7 @@ rm(all_data, variables, years, final_data_with_percentages)
 gc()
 
 ```
+
 # Limit to NYC
 
 ```{r}
