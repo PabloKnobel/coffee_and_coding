@@ -39,7 +39,7 @@ Where to find variables: https://data.census.gov/table
 
 ```{r}
 # Set your Census API key (install if not already installed)
-census_api_key("c0a3624f34fb76482a64d7077d775860c5a87d98", install = TRUE, overwrite = TRUE)
+census_api_key("your key", install = TRUE, overwrite = TRUE)
 
 # Define ACS variables with corresponding labels
 variables <- c(
